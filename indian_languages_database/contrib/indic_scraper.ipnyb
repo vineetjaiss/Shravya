@@ -1,0 +1,393 @@
+# Pre-requisites
+
+- Python 3.5+
+- Python packages: 
+    - `pip install bs4 pandas mmh3`
+- [Indic NLP Library](https://github.com/anoopkunchukuttan/indic_nlp_library)
+- [Indic NLP Resources](https://github.com/anoopkunchukuttan/indic_nlp_resources)
+# Initialize the Indic NLP Library
+
+Run the cell below to initialize the Indic NLP Library
+# The path to the local git repo for Indic NLP Library
+INDIC_NLP_LIB_HOME="/disk1/src/indic_nlp_library"
+
+# The path to the local git repo for Indic NLP Resources
+INDIC_NLP_RESOURCES="/disk1/src/indic_nlp_resources"
+
+import sys
+sys.path.append('{}/src'.format(INDIC_NLP_LIB_HOME))
+
+from indicnlp import common
+common.set_resources_path(INDIC_NLP_RESOURCES)
+
+from indicnlp import loader
+loader.load()
+from bs4 import BeautifulSoup
+import os
+import string
+import indicnlp
+from indicnlp.tokenize import indic_tokenize
+from indicnlp.normalize import indic_normalize
+from indicnlp.transliterate import unicode_transliterate
+from indicnlp.tokenize import sentence_tokenize
+import re
+import collections
+import random
+import mmh3
+# Common Functions
+def preprocess_sent(text,lang,normalizer):
+    """
+        Pre-process text (normalization and tokenization)
+        
+        text: text string to preprocess
+        lang: language code (2-letter ISO code)
+        normalizer: normalizer object for language
+        
+        returns the processed text string
+    """
+    return ' '.join(indic_tokenize.trivial_tokenize(normalizer.normalize(text.replace('\n',' ')),lang)) 
+
+def sent_split(text,lang):
+    """
+        Sentence splitter
+        
+        text: text to sentence split 
+        lang: language
+        
+        returns list of sentences 
+    """
+    return  sentence_tokenize.sentence_split(text,lang)
+
+def extract_all_content(indir,lang,
+                        article_extract_fn,
+                        preprocess_fn=preprocess_sent,
+                        narticles=-1,
+                        start_artid=0):
+    """
+    This method reads all files from the input directory, extracts text content from each file,
+    and pre-processes the text. This method is a generator. 
+    For each sentence, the method yields a tuple of the format: 
+    
+    (artid, fname, paraid, sentid, processed_text)
+    
+    indir: path to input directoryo containing files to be parsed 
+    
+    lang: language to the files in the input directory
+    
+    article_extract_fn: the function to extract text content from each file. 
+        Signature of the function: get_article_contents(fname,lang,encoding) 
+          `fname` is name of the file, `lang` is langcode, 
+          `encoding` is text-encoding (default=utf-8). 
+        The function yields a tuple (paraid, sentid, extracted_text) 
+        for each  sentence.
+        
+    preprocess_fn: pre-processing function to apply to the extracted text. 
+        The function takes a string as input and returns processed string as output.
+        
+    narticles: extract and process the first `narticles` from input directory. 
+        if narticles=-1 (default), all files are extracted
+        
+    start_artid: the start of the article id to assign to extracted articles (default=0)
+    
+    """
+
+    fnames = os.listdir(indir)
+    if narticles>0:
+        fnames=fnames[:narticles]
+    nsent=0
+
+    normalizer_factory=indic_normalize.IndicNormalizerFactory()
+    normalizer=normalizer_factory.get_normalizer(lang)
+             
+    print('Number of articles: {}'.format(len(fnames)))
+    for artid, fname in enumerate(fnames,start_artid):
+#         print(fname)
+        if artid%100 == 0:
+            print('({}|{})'.format(artid,nsent),end=' ... ')
+        
+        try:
+            fpath=os.sep.join([indir,fname])
+            for paraid, sentid, sent in article_extract_fn(fpath,lang):
+                nsent+=1
+                yield( ( artid, fname, paraid, sentid, preprocess_fn(sent,lang,normalizer) ) )
+        except:
+            print('Cannot parse {}'.format(fname))
+                
+def write_corpus(corpus_iterator,content_fname,article_mapping_fname,delimiter=' ||| ', encoding='utf-8'):
+    """
+    Writes the extracted corpus to a file. The extracted data is organized in terms of articles, paragraphs 
+    and sentences. The following is the format of the output file: 
+        - one line per sentence
+        - format of line: article_id, para_id, sent_id, sentence
+    In addition to the content file mention, a metadata file which maps the article id to the filename is also written. 
+    
+    corpus_iterator: iterator over the corpus, yielding tuple (artid, fname, paraid, sentid, processed_text). 
+        The function `extract_all_content` yields a generator in this format. 
+    content_fname: output content file to write the extracted data to in the format mentioned above
+    article_mapping_fname: output metadata file to write article id to filename mapping.
+    delimiter=' ||| ': delimiter for the content file. The default delimiter is the same 
+                        as used in the Moses phrase table
+    encoding: text encoding default - 'utf-8'
+    
+    """
+    
+    artid_name_mapping={}
+    with open(content_fname,'w',encoding=encoding) as contentfile:
+        for artid, fname, paraid, sentid, text in corpus_iterator:
+            contentfile.write(delimiter.join([str(artid), str(paraid), str(sentid), text]) + '\n')
+            artid_name_mapping[artid]=fname
+
+    with open(article_mapping_fname,'w',encoding=encoding) as artmappingfile:
+        for artid, name in sorted(artid_name_mapping.items(),key=lambda x: x[0]):
+            artmappingfile.write('{} {} {}\n'.format(artid,delimiter,name))
+
+def convert_txt_to_csv_format(infname, outfname, encoding='utf-8'):
+    """
+    convert txt file to csv format. This method is used when the text file is directly available.
+    The input file has one sentence per line. Assumed to be preprocessed (tokenized, normalized)
+    
+    """
+    with open(infname,'r',encoding=encoding) as infile, \
+         open(outfname,'w',encoding=encoding) as outfile: 
+        for i, line in enumerate(infile):
+            outfile.write('0 ||| 0 ||| {} ||| {}\n'.format(i,line.strip()))
+            
+def preprocess_convert_txt_to_csv_format(infname, outfname, lang, encoding='utf-8'):
+    """
+    Convert raw text file to csv format
+    """
+    
+    normalizer_factory=indic_normalize.IndicNormalizerFactory()
+    normalizer=normalizer_factory.get_normalizer(lang)
+    
+    with open(infname,'r',encoding=encoding) as infile, \
+         open(outfname,'w',encoding=encoding) as outfile: 
+        i=0
+        for line in infile:
+            sents = sent_split(line.strip(),lang)
+            for sent in sents:
+                outfile.write('0 ||| 0 ||| {} ||| {}\n'.format(i,
+                                                    preprocess_sent(sent.strip(), lang, normalizer)) )
+                i=i+1
+
+def print_txt(infnames, outfname, encoding='utf-8'):
+    """
+    Extract only the text from the content csv file. The output file has one sentence per file.
+    """
+    with open(outfname,'w',encoding=encoding) as outfile: 
+        for infname in filter(lambda x: os.path.isfile(x),infnames):
+            with open(infname,'r',encoding=encoding) as infile:
+                for i, line in enumerate(infile):
+                    fields=line.strip().split('|||')
+                    if len(fields) >=4:
+                        outfile.write('{}\n'.format(fields[3].strip()))
+                        
+# def dedup_and_print_txt(infnames, outfname, encoding='utf-8'):
+    
+#     total=0
+#     unique=0
+#     hash_codes=set()
+    
+#     with open(outfname,'w',encoding=encoding) as outfile: 
+#         for infname in filter(lambda x: os.path.isfile(x),infnames):
+#             with open(infname,'r',encoding=encoding) as infile:
+#                 for i, line in enumerate(infile):
+#                     fields=line.strip().split('|||')
+#                     if len(fields) >=4:
+#                         sent=fields[3].strip()
+#                         total+=1
+#                         hs=hash(sent)
+#                         if hs not in hash_codes:
+#                             outfile.write('{}\n'.format(sent))
+#                             hash_codes.add(hs)
+#                             unique+=1
+    
+#     print('Total: {}'.format(total))
+#     print('Unique: {}'.format(unique))
+
+def dedup_shuffle_and_print_txt(infnames, outfname, max_buf_size=100000,encoding='utf-8'):
+    """
+    The method creates a sentence level corpora from multiple content csv files.
+    All sentences are extracted, they are de-duplicated using murmurhash and shuffled
+    before writing the entire corpus to the output file. The output file has one sentence per line.
+
+    """
+    
+    total=0
+    unique=0
+    hash_codes=set()
+    sent_buffer=[]
+    
+    with open(outfname,'w',encoding=encoding) as outfile: 
+        for infname in filter(lambda x: os.path.isfile(x),infnames):
+            print('Processing: {}'.format(infname))
+            with open(infname,'r',encoding=encoding) as infile:
+                for i, line in enumerate(infile):
+                    fields=line.strip().split('|||')
+                    if len(fields) >=4:
+                        sent=fields[3].strip()
+                        total+=1
+#                         hs=hash(sent)
+                        hs=mmh3.hash128(sent)
+                        if hs not in hash_codes:
+#                             outfile.write('{}\n'.format(sent))
+                            sent_buffer.append(sent)
+                            hash_codes.add(hs)
+                            unique+=1
+                    if len(sent_buffer)>=max_buf_size:
+                        random.shuffle(sent_buffer)
+                        for sent in sent_buffer: 
+                            outfile.write('{}\n'.format(sent))
+                        sent_buffer.clear()
+                
+        if len(sent_buffer)>0:
+            random.shuffle(sent_buffer)
+            for sent in sent_buffer: 
+                outfile.write('{}\n'.format(sent))
+            sent_buffer.clear()                    
+                        
+    print('Total: {}'.format(total))
+    print('Unique: {}'.format(unique))
+
+def extract_wikiextractor_file(infname, outfname, lang, 
+                               encoding='utf-8', delimiter=' ||| ', preprocess_fn=preprocess_sent):
+    """
+    Extract text content into a content csv file from wikipedia article page. 
+    The wikipedia article page is the output from `wikiextractor` [https://github.com/attardi/wikiextractor] 
+    
+    """
+    normalizer_factory=indic_normalize.IndicNormalizerFactory()
+    normalizer=normalizer_factory.get_normalizer(lang)
+    
+    with open(infname,'r',encoding=encoding) as infile, \
+         open(outfname,'w',encoding=encoding) as outfile: 
+        artid=-1
+        paraid=0
+        for line in infile:
+            if line.find('<doc')==0:
+                artid+=1
+                paraid=0
+                continue
+            if line.find('</doc')==0:
+                continue
+            if len(line.strip())>0:
+                for sentid, sent in enumerate(sent_split(line.strip(),lang)):
+                    sent=sent.strip()
+                    if sent!='':
+                        sent = preprocess_fn(sent,lang,normalizer)
+                        outfile.write(delimiter.join([str(artid), str(paraid), str(sentid), sent]) + '\n')
+                paraid+=1
+
+                
+def extract_leipzig_corpus(infname,outfname,lang,encoding='utf-8'):
+    """
+    Extractor for files form the Leipzig corpus
+    [http://wortschatz.uni-leipzig.de/en/download/]
+    
+    """
+    normalizer_factory=indic_normalize.IndicNormalizerFactory()
+    normalizer=normalizer_factory.get_normalizer(lang)    
+
+    with open(infname,'r',encoding=encoding) as infile, \
+         open(outfname,'w',encoding=encoding) as outfile: 
+        for i, line in enumerate(infile):
+            outfile.write('0 ||| 0 ||| {} ||| {}\n'.format(i,preprocess_sent(line,lang,normalizer)))                
+                
+def dataset_stats(fname):
+    """
+    Extracts dataset statistics from the final extracted file. This input file contains
+    one sentence per line. The sentences are tokenized.
+    """
+
+    all_puncs=set(string.punctuation+'\u0964\u0965')
+    
+    sent_count=0
+    token_cnt=0
+    true_token_cnt=0
+    tokens=set()
+    
+    with open(fname,'r',encoding='utf-8') as infile:
+        for line in infile:
+            sent_count+=1
+            a=line.strip().split(' ')
+            token_cnt+=len(a)
+            b=list(filter(lambda x: x not in all_puncs,a))
+            true_token_cnt+=len(b)
+            tokens.update(b)
+    
+    print('== Stats ==')
+    print('Sent count: {}'.format(sent_count))
+    print('Token count: {}'.format(token_cnt))
+    print('True Token count: {}'.format(true_token_cnt))
+    print('Unique Token count: {}'.format(len(tokens)))
+
+# Marathi
+## Wikipedia
+### Wikipedia extraction commands using wikiextractor
+
+```
+### This uses WikiExtractor (https://github.com/attardi/wikiextractor)
+
+x=/disk1/crawl_project/ta/wikipedia
+mkdir $x
+cd $x
+wget https://dumps.wikimedia.org/tawiki/20190501/tawiki-20190501-pages-articles-multistream.xml.bz2
+cd /disk1/src/wikiextractor
+python3 WikiExtractor.py -cb 250k -o $x/extracted $x/tawiki-20190501-pages-articles-multistream.xml.bz2
+cd -
+find extracted -name '*bz2' -exec bunzip2 -c {} \; > text.xml
+rm text.xml
+rm tawiki-20190501-pages-articles-multistream.xml.bz2
+rm -rf extracted
+```
+mrwiki-20190401-pages-articles-multistream.xml.bz2
+
+INFO: Finished 1-process extraction of 53715 articles in 123.6s (434.7 art/s)
+
+INFO: total of page: 102025, total of articl page: 53715; total of used articl page: 53715
+### Post-processing output generated by wikiextractor
+## tex.xml is extracted as shown in commanfs above
+extract_wikiextractor_file('text.xml',
+                           'content_fname1.csv',
+                           'mr')
+## Loksatta
+**Extractor function for Marathi Loksatta page**
+def get_article_contents_mr_loksatta(fname,lang,encoding='utf-8'):
+    with open(fname,'r',encoding=encoding) as infile: 
+        soup = BeautifulSoup(infile)
+        for elem in soup.find_all('div'):
+            if 'itemprop' in elem.attrs and 'articleBody' in elem['itemprop']:
+                filtered_paras=list(filter(lambda x: x.name=='p' and len(x.attrs)==0,elem.children))
+                paraid=0
+                for blockid, block in enumerate(filtered_paras):
+#                     print('Para: {}'.format(blockid))
+#                     print(list(block.strings))
+                    text=' '.join(block.strings)
+                    if blockid==0 and text.find(':')>=0 and text.find(':')<20:
+                        text=':'.join(text.split(':')[1:])
+                    for para_text in text.split('\n'): 
+                        for sentid, sent in enumerate(sent_split(para_text,lang)):
+                            sent=sent.strip()
+                            if sent!='':
+    #                             print('{}: {}'.format(sentid, sent))
+                                yield((paraid,sentid,sent))
+    #                             yield((paraid,sentid,preprocess_sent(sent,'ml',normalizer)))
+    #                     print()   
+                        paraid+=1
+**Extracting data from crawled HTML files**
+lang='mr'
+posts_dir='directory_containing_crawled_html_pages'
+content_fname='content_fname2.csv'
+article_mapping_fname='article_mapping_fname'
+get_article_contents=get_article_contents_mr_loksatta
+narticles=-1
+write_corpus(
+             extract_all_content(posts_dir, lang, article_extract_fn=get_article_contents,narticles=narticles),
+             content_fname,
+             article_mapping_fname
+            )
+## Aggregating all crawled data
+### aggregating, de-duplicating and shuffling all the data 
+dedup_shuffle_and_print_txt([ 'content_fname1.csv', 'content_fname2.csv'  ],  'output_fname.txt' )
+### extract dataset statistics
+dataset_stats('output_fname.txt')
