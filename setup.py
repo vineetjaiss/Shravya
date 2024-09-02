@@ -20,13 +20,10 @@ version=write_version_py()
 setuptools.setup(
     name="indic_nlp_library", # Replace with your own username
     version=version,
-    author="Anoop Kunchukuttan",
-    author_email="anoop.kunchukuttan@gmail.com",
     description="The goal of the Indic NLP Library is to build Python based libraries for common"\
         ' text processing and Natural Language Processing in Indian languages.',
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/anoopkunchukuttan/indic_nlp_library",
     # project_urls={
     #     "Bug Tracker": "https://bugs.example.com/HelloWorld/",
     #     "Documentation": "https://docs.example.com/HelloWorld/",
